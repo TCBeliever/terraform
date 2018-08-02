@@ -14,8 +14,6 @@ import (
 	"strconv"
 	"strings"
 
-	"golang.org/x/net/html"
-
 	getter "github.com/hashicorp/go-getter"
 	multierror "github.com/hashicorp/go-multierror"
 
@@ -27,18 +25,9 @@ import (
 	"github.com/mitchellh/cli"
 )
 
-// Releases are located by parsing the html listing from releases.hashicorp.com.
-//
-// The URL for releases follows the pattern:
-//    https://releases.hashicorp.com/terraform-provider-name/<x.y.z>/terraform-provider-name_<x.y.z>_<os>_<arch>.<ext>
-//
-// The plugin protocol version will be saved with the release and returned in
-// the header X-TERRAFORM_PROTOCOL_VERSION.
+// Releases are located by querying the terraform registry.
 
 const protocolVersionHeader = "x-terraform-protocol-version"
-
-//var releaseHost = "https://releases.hashicorp.com"
-var releaseHost = "https://tf-registry-staging.herokuapp.com"
 
 var httpClient *http.Client
 
@@ -95,6 +84,10 @@ type ProviderInstaller struct {
 
 	// registry client
 	registry *registry.Client
+
+	// provider is the name of the provider being installed by this particular
+	// instance of ProviderInstaller
+	provider string
 }
 
 // Get is part of an implementation of type Installer, and attempts to download
@@ -118,6 +111,7 @@ type ProviderInstaller struct {
 // error messages do not redundantly include such information.
 func (i *ProviderInstaller) Get(provider string, req Constraints) (PluginMeta, error) {
 	// a little bit of initialization
+	// I don't think this goes here. Suggestions?
 	if i.OS == "" {
 		i.OS = runtime.GOOS
 	}
@@ -127,6 +121,7 @@ func (i *ProviderInstaller) Get(provider string, req Constraints) (PluginMeta, e
 	if i.registry == nil {
 		i.registry = registry.NewClient(i.Services, nil, nil)
 	}
+	i.setProvider(provider)
 
 	allVersions, err := i.listProviderVersions(provider)
 
@@ -161,33 +156,9 @@ func (i *ProviderInstaller) Get(provider string, req Constraints) (PluginMeta, e
 	// check plugin protocol compatibility
 	// We only validate the most recent version that meets the version constraints.
 	// see RFC TF-055: Provider Protocol Versioning for more information
-	protoString := strconv.Itoa(int(i.PluginProtocolVersion))
-	protocolVersion, err := VersionStr(protoString).Parse()
+	err = i.checkPluginProtocol(versionMeta)
 	if err != nil {
-		return PluginMeta{}, fmt.Errorf("invalid plugin protocol version: %q", i.PluginProtocolVersion)
-	}
-	protocolConstraint, err := protocolVersion.MinorUpgradeConstraintStr().Parse()
-	if err != nil {
-		// This should not fail if the preceding function succeeded.
-		return PluginMeta{}, fmt.Errorf("invalid plugin protocol version: %q", protocolVersion.String())
-	}
-
-	for _, p := range versionMeta.Protocols {
-		proPro, err := VersionStr(p).Parse()
-		if err != nil {
-			// invalid protocol reported by the registry. Move along.
-			log.Printf("[WARN] invalid provider protocol version %q found in the registry", provider, versionMeta.Version)
-			continue
-		}
-		if !protocolConstraint.Allows(proPro) {
-			// TODO: get most recent compatible plugin and return a handy-dandy string for the user
-			// latest, err := getNewestCompatiblePlugin
-			// i.Ui.output|info): "the latest version of plugin BLAH which supports protocol BLAH is BLAH"
-			// Add this to your provider block:
-			// version = ~BLAH
-			// and if none is found, return ErrorNoVersionCompatible
-			return PluginMeta{}, fmt.Errorf("The latest version of plugin %q does not support plugin protocol version %q", provider, protocolVersion)
-		}
+		return PluginMeta{}, err
 	}
 
 	var downloadURLs *response.TerraformProviderPlatformLocation
@@ -208,7 +179,7 @@ func (i *ProviderInstaller) Get(provider string, req Constraints) (PluginMeta, e
 	providerURL := downloadURLs.DownloadURL
 
 	if !i.SkipVerify {
-		sha256, err := i.getProviderChecksum(provider, downloadURLs)
+		sha256, err := i.getProviderChecksum(downloadURLs)
 		if err != nil {
 			return PluginMeta{}, err
 		}
@@ -387,44 +358,7 @@ func (i *ProviderInstaller) PurgeUnused(used map[string]PluginMeta) (PluginMetaS
 	return removed, errs
 }
 
-// Plugins are referred to by the short name, but all URLs and files will use
-// the full name prefixed with terraform-<plugin_type>-
-func (i *ProviderInstaller) providerName(name string) string {
-	return "terraform-provider-" + name
-}
-
-func (i *ProviderInstaller) providerFileName(name, version string) string {
-	os := i.OS
-	arch := i.Arch
-	if os == "" {
-		os = runtime.GOOS
-	}
-	if arch == "" {
-		arch = runtime.GOARCH
-	}
-	return fmt.Sprintf("%s_%s_%s_%s.zip", i.providerName(name), version, os, arch)
-}
-
-// providerVersionsURL returns the path to the released versions directory for the provider:
-// https://releases.hashicorp.com/terraform-provider-name/
-func (i *ProviderInstaller) providerVersionsURL(name string) string {
-	return releaseHost + "/" + i.providerName(name) + "/"
-}
-
-// providerURL returns the full path to the provider file, using the current OS
-// and ARCH:
-// .../terraform-provider-name_<x.y.z>/terraform-provider-name_<x.y.z>_<os>_<arch>.<ext>
-func (i *ProviderInstaller) providerURL(name, version string) string {
-	return fmt.Sprintf("%s%s/%s", i.providerVersionsURL(name), version, i.providerFileName(name, version))
-}
-
-func (i *ProviderInstaller) providerChecksumURL(name, version string) string {
-	fileName := fmt.Sprintf("%s_%s_SHA256SUMS", i.providerName(name), version)
-	u := fmt.Sprintf("%s%s/%s", i.providerVersionsURL(name), version, fileName)
-	return u
-}
-
-func (i *ProviderInstaller) getProviderChecksum(name string, urls *response.TerraformProviderPlatformLocation) (string, error) {
+func (i *ProviderInstaller) getProviderChecksum(urls *response.TerraformProviderPlatformLocation) (string, error) {
 	checksums, err := getPluginSHA256SUMs(urls.ShasumsURL, urls.ShasumsSignatureURL)
 	if err != nil {
 		return "", err
@@ -438,6 +372,49 @@ func (i *ProviderInstaller) listProviderVersions(name string) (*response.Terrafo
 	provider := regsrc.NewTerraformProvider(name, i.OS, i.Arch)
 	versions, err := i.registry.TerraformProviderVersions(provider)
 	return versions, err
+}
+
+func (i *ProviderInstaller) listProviderDownloadURLs(name, version string) (*response.TerraformProviderPlatformLocation, error) {
+	urls, err := i.registry.TerraformProviderLocation(regsrc.NewTerraformProvider(name, i.OS, i.Arch), version)
+	return urls, err
+}
+
+func (i *ProviderInstaller) checkPluginProtocol(versionMeta *response.TerraformProviderVersion) error {
+	protoString := strconv.Itoa(int(i.PluginProtocolVersion))
+	protocolVersion, err := VersionStr(protoString).Parse()
+	if err != nil {
+		return fmt.Errorf("invalid plugin protocol version: %q", i.PluginProtocolVersion)
+	}
+	protocolConstraint, err := protocolVersion.MinorUpgradeConstraintStr().Parse()
+	if err != nil {
+		// This should not fail if the preceding function succeeded.
+		return fmt.Errorf("invalid plugin protocol version: %q", protocolVersion.String())
+	}
+
+	for _, p := range versionMeta.Protocols {
+		proPro, err := VersionStr(p).Parse()
+		if err != nil {
+			// invalid protocol reported by the registry. Move along.
+			log.Printf("[WARN] invalid provider protocol version %q found in the registry", versionMeta.Version)
+			continue
+		}
+		if !protocolConstraint.Allows(proPro) {
+			// TODO: get most recent compatible plugin and return a handy-dandy string for the user
+			// latest, err := getNewestCompatiblePlugin
+			// i.Ui.output|info): "the latest version of plugin BLAH which supports protocol BLAH is BLAH"
+			// Add this to your provider block:
+			// version = ~BLAH
+			// and if none is found, return ErrorNoVersionCompatible
+			return fmt.Errorf("The latest version of plugin %q does not support plugin protocol version %q", i.provider, protocolVersion)
+		}
+	}
+	return nil
+}
+
+func (i *ProviderInstaller) setProvider(p string) {
+	if i.provider == "" {
+		i.provider = p
+	}
 }
 
 // take the list of available versions for a plugin, and filter out those that
@@ -457,79 +434,6 @@ func allowedVersions(available *response.TerraformProviderVersions, required Con
 	}
 
 	return allowed
-}
-
-// return a list of the plugin versions at the given URL
-func listPluginVersions(url string) ([]Version, error) {
-	resp, err := httpClient.Get(url)
-	if err != nil {
-		// http library produces a verbose error message that includes the
-		// URL being accessed, etc.
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := ioutil.ReadAll(resp.Body)
-		log.Printf("[ERROR] failed to fetch plugin versions from %s\n%s\n%s", url, resp.Status, body)
-
-		switch resp.StatusCode {
-		case http.StatusNotFound, http.StatusForbidden:
-			// These are treated as indicative of the given name not being
-			// a valid provider name at all.
-			return nil, ErrorNoSuchProvider
-
-		default:
-			// All other errors are assumed to be operational problems.
-			return nil, fmt.Errorf("error accessing %s: %s", url, resp.Status)
-		}
-
-	}
-
-	body, err := html.Parse(resp.Body)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	names := []string{}
-
-	// all we need to do is list links on the directory listing page that look like plugins
-	var f func(*html.Node)
-	f = func(n *html.Node) {
-		if n.Type == html.ElementNode && n.Data == "a" {
-			c := n.FirstChild
-			if c != nil && c.Type == html.TextNode && strings.HasPrefix(c.Data, "terraform-") {
-				names = append(names, c.Data)
-				return
-			}
-		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			f(c)
-		}
-	}
-	f(body)
-
-	return versionsFromNames(names), nil
-}
-
-// parse the list of directory names into a sorted list of available versions
-func versionsFromNames(names []string) []Version {
-	var versions []Version
-	for _, name := range names {
-		parts := strings.SplitN(name, "_", 2)
-		if len(parts) == 2 && parts[1] != "" {
-			v, err := VersionStr(parts[1]).Parse()
-			if err != nil {
-				// filter invalid versions scraped from the page
-				log.Printf("[WARN] invalid version found for %q: %s", name, err)
-				continue
-			}
-
-			versions = append(versions, v)
-		}
-	}
-
-	return versions
 }
 
 func checksumForFile(sums []byte, name string) string {
@@ -577,13 +481,4 @@ func getFile(url string) ([]byte, error) {
 		return data, err
 	}
 	return data, nil
-}
-
-func GetReleaseHost() string {
-	return releaseHost
-}
-
-func (i *ProviderInstaller) listProviderDownloadURLs(name, version string) (*response.TerraformProviderPlatformLocation, error) {
-	urls, err := i.registry.TerraformProviderLocation(regsrc.NewTerraformProvider(name, i.OS, i.Arch), version)
-	return urls, err
 }
