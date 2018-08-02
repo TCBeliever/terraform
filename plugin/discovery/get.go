@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -140,7 +139,8 @@ func (i *ProviderInstaller) Get(provider string, req Constraints) (PluginMeta, e
 	}
 
 	// sort them newest to oldest
-	sort.Sort(response.Collection(versions))
+	response.Collection(versions).Sort()
+
 	// the winning version is the newest
 	versionMeta := versions[0]
 	// get a Version from the version string

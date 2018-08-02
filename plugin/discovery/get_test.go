@@ -13,7 +13,6 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
-	"sort"
 	"strings"
 	"testing"
 
@@ -63,8 +62,8 @@ func testChecksumHandler(w http.ResponseWriter, r *http.Request) {
 // returns a 200 for a valid provider url, using the patch number for the
 // plugin protocol version.
 func testHandler(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/terraform-provider-test/" {
-		//if strings.HasSuffix(r.URL.Path, "/versions") {
+	// if r.URL.Path == "/terraform-provider-test/" {
+	if strings.HasSuffix(r.URL.Path, "/versions") {
 		testListingHandler(w, r)
 		return
 	}
@@ -100,21 +99,16 @@ func testHandler(w http.ResponseWriter, r *http.Request) {
 
 func testReleaseServer() *httptest.Server {
 	handler := http.NewServeMux()
-	handler.HandleFunc("v1/providers/terraform-providers/test/", testHandler)
+	handler.HandleFunc("/v1/providers/terraform-providers/test/", testHandler)
 	handler.HandleFunc("/terraform-provider-template/", testChecksumHandler)
 	handler.HandleFunc("/terraform-provider-badsig/", testChecksumHandler)
-	handler.HandleFunc("/.well-known/terraform.json", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `{"modules.v1":"http://localhost/v1/modules/", "providers.v1":"http://localhost/v1/providers/"}`)
-	})
+	// handler.HandleFunc("/.well-known/terraform.json", func(w http.ResponseWriter, r *http.Request) {
+	// 	w.Header().Set("Content-Type", "application/json")
+	// 	io.WriteString(w, `{"modules.v1":"http://localhost/v1/modules/", "providers.v1":"http://localhost/v1/providers/"}`)
+	// })
 
 	return httptest.NewServer(handler)
 }
-
-// func TestMain(m *testing.M) {
-// 	server := testReleaseServer()
-// 	os.Exit(m.Run())
-// }
 
 func TestVersionListing(t *testing.T) {
 	server := testReleaseServer()
@@ -133,14 +127,12 @@ func TestVersionListing(t *testing.T) {
 		versions = append(versions, v)
 	}
 
-	sort.Sort(response.Collection(versions))
+	response.Collection(versions).Sort()
 
-	fmt.Printf("%#v\n", versions)
-
-	expected := []string{
-		"1.2.4",
-		"1.2.3",
-		"1.2.1",
+	expected := []*response.TerraformProviderVersion{
+		{Version: "1.2.4"},
+		{Version: "1.2.3"},
+		{Version: "1.2.1"},
 	}
 
 	if len(versions) != len(expected) {
@@ -148,7 +140,7 @@ func TestVersionListing(t *testing.T) {
 	}
 
 	for i, v := range versions {
-		if v.Version != expected[i] {
+		if v.Version != expected[i].Version {
 			t.Fatalf("incorrect version: %q, expected %q", v, expected[i])
 		}
 	}
@@ -345,16 +337,16 @@ func TestProviderChecksum(t *testing.T) {
 	}{
 		{
 			&response.TerraformProviderPlatformLocation{
-				ShasumsSignatureURL: "/terraform-provider-template/0.1.0/terraform-provider-template_0.1.0_SHA256SUMS",
-				ShasumsURL:          "/terraform-provider-template/0.1.0/terraform-provider-template_0.1.0_SHA256SUMS.sig",
+				ShasumsURL:          "https://registry.terraform.io/terraform-provider-template/0.1.0/terraform-provider-template_0.1.0_SHA256SUMS",
+				ShasumsSignatureURL: "https://registry.terraform.io/terraform-provider-template/0.1.0/terraform-provider-template_0.1.0_SHA256SUMS.sig",
 				Filename:            "terraform-provider-template_0.1.0_darwin_amd64.zip",
 			},
 			false,
 		},
 		{
 			&response.TerraformProviderPlatformLocation{
-				ShasumsSignatureURL: "/terraform-provider-badsig/0.1.0/terraform-provider-badsig_0.1.0_SHA256SUMS",
-				ShasumsURL:          "/terraform-provider-badsig/0.1.0/terraform-provider-badsig_0.1.0_SHA256SUMS.sig",
+				ShasumsURL:          "https://registry.terraform.io/terraform-provider-badsig/0.1.0/terraform-provider-badsig_0.1.0_SHA256SUMS",
+				ShasumsSignatureURL: "https://registry.terraform.io/terraform-provider-badsig/0.1.0/terraform-provider-badsig_0.1.0_SHA256SUMS.sig",
 				Filename:            "terraform-provider-template_0.1.0_darwin_amd64.zip",
 			},
 			true,
