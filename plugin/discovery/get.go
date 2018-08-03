@@ -156,6 +156,8 @@ func (i *ProviderInstaller) Get(provider string, req Constraints) (PluginMeta, e
 	// check plugin protocol compatibility
 	// We only validate the most recent version that meets the version constraints.
 	// see RFC TF-055: Provider Protocol Versioning for more information
+
+	fmt.Println("checking protocol version")
 	err = i.checkPluginProtocol(versionMeta)
 	if err != nil {
 		return PluginMeta{}, err

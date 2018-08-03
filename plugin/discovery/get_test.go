@@ -35,6 +35,16 @@ func testListingHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write(js)
 }
 
+// return the download URLs for the "test" provider
+func testDownloadHandler(w http.ResponseWriter, r *http.Request) {
+	js, err := json.Marshal(downloadURLs)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Write(js)
+}
+
 func testChecksumHandler(w http.ResponseWriter, r *http.Request) {
 	// this exact plugin has a signnature and checksum file
 	if r.URL.Path == "/terraform-provider-template/0.1.0/terraform-provider-template_0.1.0_SHA256SUMS" {
@@ -65,6 +75,11 @@ func testHandler(w http.ResponseWriter, r *http.Request) {
 	// if r.URL.Path == "/terraform-provider-test/" {
 	if strings.HasSuffix(r.URL.Path, "/versions") {
 		testListingHandler(w, r)
+		return
+	}
+
+	if strings.Contains(r.URL.Path, "/download") {
+		testDownloadHandler(w, r)
 		return
 	}
 
@@ -208,6 +223,7 @@ func TestProviderInstallerGet(t *testing.T) {
 		registry:              registry.NewClient(Disco(server), nil, nil),
 	}
 	_, err = i.Get("test", AllVersions)
+
 	if err != ErrorNoVersionCompatible {
 		t.Fatal("want error for incompatible version")
 	}
@@ -217,7 +233,6 @@ func TestProviderInstallerGet(t *testing.T) {
 		PluginProtocolVersion: 3,
 		SkipVerify:            true,
 		Ui:                    cli.NewMockUi(),
-		registry:              registry.NewClient(Disco(server), nil, nil),
 	}
 
 	{
@@ -408,4 +423,10 @@ var versionList = response.TerraformProvider{
 		{Version: "1.2.3"},
 		{Version: "1.2.4"},
 	},
+}
+
+var downloadURLs = response.TerraformProviderPlatformLocation{
+	ShasumsURL:          "https://registry.terraform.io/terraform-provider-template/0.1.0/terraform-provider-template_0.1.0_SHA256SUMS",
+	ShasumsSignatureURL: "https://registry.terraform.io/terraform-provider-template/0.1.0/terraform-provider-template_0.1.0_SHA256SUMS.sig",
+	Filename:            "terraform-provider-template_0.1.0_darwin_amd64.zip",
 }
