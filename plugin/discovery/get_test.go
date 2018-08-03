@@ -6,12 +6,13 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -25,14 +26,42 @@ import (
 
 const testProviderFile = "test provider binary"
 
+func TestMain(m *testing.M) {
+	server := testReleaseServer()
+	l, err := net.Listen("tcp", "127.0.0.1:8080")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// NewUnstartedServer creates a listener. Close that listener and replace
+	// with the one we created.
+	server.Listener.Close()
+	server.Listener = l
+	server.Start()
+	defer server.Close()
+
+	os.Exit(m.Run())
+}
+
 // return the directory listing for the "test" provider
 func testListingHandler(w http.ResponseWriter, r *http.Request) {
-	js, err := json.Marshal(versionList)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) != 6 {
+		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	w.Write(js)
+	provider := parts[4]
+	if provider == "test" {
+		js, err := json.Marshal(versionList)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Write(js)
+	}
+	http.Error(w, ErrorNoSuchProvider.Error(), http.StatusNotFound)
+	return
+
 }
 
 // return the download URLs for the "test" provider
@@ -46,7 +75,7 @@ func testDownloadHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func testChecksumHandler(w http.ResponseWriter, r *http.Request) {
-	// this exact plugin has a signnature and checksum file
+	// this exact plugin has a signature and checksum file
 	if r.URL.Path == "/terraform-provider-template/0.1.0/terraform-provider-template_0.1.0_SHA256SUMS" {
 		http.ServeFile(w, r, "testdata/terraform-provider-template_0.1.0_SHA256SUMS")
 		return
@@ -72,7 +101,6 @@ func testChecksumHandler(w http.ResponseWriter, r *http.Request) {
 // returns a 200 for a valid provider url, using the patch number for the
 // plugin protocol version.
 func testHandler(w http.ResponseWriter, r *http.Request) {
-	// if r.URL.Path == "/terraform-provider-test/" {
 	if strings.HasSuffix(r.URL.Path, "/versions") {
 		testListingHandler(w, r)
 		return
@@ -84,26 +112,14 @@ func testHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	parts := strings.Split(r.URL.Path, "/")
-	if len(parts) != 4 {
+	if len(parts) != 7 {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
 
-	filename := parts[3]
-
-	reg := regexp.MustCompile(`(terraform-provider-test)_(\d).(\d).(\d)_([^_]+)_([^._]+).zip`)
-
-	fileParts := reg.FindStringSubmatch(filename)
-	if len(fileParts) != 7 {
-		http.Error(w, "invalid provider: "+filename, http.StatusNotFound)
-		return
-	}
-
-	w.Header().Set(protocolVersionHeader, fileParts[4])
-
 	// write a dummy file
 	z := zip.NewWriter(w)
-	fn := fmt.Sprintf("%s_v%s.%s.%s_x%s", fileParts[1], fileParts[2], fileParts[3], fileParts[4], fileParts[4])
+	fn := fmt.Sprintf("%s_v%s", parts[4], parts[5])
 	f, err := z.Create(fn)
 	if err != nil {
 		panic(err)
@@ -114,20 +130,22 @@ func testHandler(w http.ResponseWriter, r *http.Request) {
 
 func testReleaseServer() *httptest.Server {
 	handler := http.NewServeMux()
-	handler.HandleFunc("/v1/providers/terraform-providers/test/", testHandler)
+	handler.HandleFunc("/v1/providers/terraform-providers/", testHandler)
 	handler.HandleFunc("/terraform-provider-template/", testChecksumHandler)
 	handler.HandleFunc("/terraform-provider-badsig/", testChecksumHandler)
-	// handler.HandleFunc("/.well-known/terraform.json", func(w http.ResponseWriter, r *http.Request) {
-	// 	w.Header().Set("Content-Type", "application/json")
-	// 	io.WriteString(w, `{"modules.v1":"http://localhost/v1/modules/", "providers.v1":"http://localhost/v1/providers/"}`)
-	// })
+	handler.HandleFunc("/.well-known/terraform.json", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"modules.v1":"http://localhost/v1/modules/", "providers.v1":"http://localhost/v1/providers/"}`)
+	})
 
-	return httptest.NewServer(handler)
+	return httptest.NewUnstartedServer(handler)
 }
 
 func TestVersionListing(t *testing.T) {
 	server := testReleaseServer()
+	server.Start()
 	defer server.Close()
+
 	i := newProviderInstaller(server)
 
 	allVersions, err := i.listProviderVersions("test")
@@ -187,6 +205,7 @@ func TestCheckProtocolVersions(t *testing.T) {
 	}
 
 	server := testReleaseServer()
+	server.Start()
 	defer server.Close()
 	i := newProviderInstaller(server)
 
@@ -205,6 +224,7 @@ func TestCheckProtocolVersions(t *testing.T) {
 
 func TestProviderInstallerGet(t *testing.T) {
 	server := testReleaseServer()
+	server.Start()
 	defer server.Close()
 
 	tmpDir, err := ioutil.TempDir("", "tf-plugin")
@@ -230,9 +250,10 @@ func TestProviderInstallerGet(t *testing.T) {
 
 	i = &ProviderInstaller{
 		Dir: tmpDir,
-		PluginProtocolVersion: 3,
+		PluginProtocolVersion: 4,
 		SkipVerify:            true,
 		Ui:                    cli.NewMockUi(),
+		registry:              registry.NewClient(Disco(server), nil, nil),
 	}
 
 	{
@@ -254,12 +275,12 @@ func TestProviderInstallerGet(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// we should have version 1.2.3
-	dest := filepath.Join(tmpDir, "terraform-provider-test_v1.2.3_x3")
+	// we should have version 1.2.4
+	dest := filepath.Join(tmpDir, "terraform-provider-test_v1.2.4")
 
 	wantMeta := PluginMeta{
 		Name:    "test",
-		Version: VersionStr("1.2.3"),
+		Version: VersionStr("1.2.4"),
 		Path:    dest,
 	}
 	if !reflect.DeepEqual(gotMeta, wantMeta) {
@@ -352,16 +373,16 @@ func TestProviderChecksum(t *testing.T) {
 	}{
 		{
 			&response.TerraformProviderPlatformLocation{
-				ShasumsURL:          "https://registry.terraform.io/terraform-provider-template/0.1.0/terraform-provider-template_0.1.0_SHA256SUMS",
-				ShasumsSignatureURL: "https://registry.terraform.io/terraform-provider-template/0.1.0/terraform-provider-template_0.1.0_SHA256SUMS.sig",
+				ShasumsURL:          "http://127.0.0.1:8080/terraform-provider-template/0.1.0/terraform-provider-template_0.1.0_SHA256SUMS",
+				ShasumsSignatureURL: "http://127.0.0.1:8080/terraform-provider-template/0.1.0/terraform-provider-template_0.1.0_SHA256SUMS.sig",
 				Filename:            "terraform-provider-template_0.1.0_darwin_amd64.zip",
 			},
 			false,
 		},
 		{
 			&response.TerraformProviderPlatformLocation{
-				ShasumsURL:          "https://registry.terraform.io/terraform-provider-badsig/0.1.0/terraform-provider-badsig_0.1.0_SHA256SUMS",
-				ShasumsSignatureURL: "https://registry.terraform.io/terraform-provider-badsig/0.1.0/terraform-provider-badsig_0.1.0_SHA256SUMS.sig",
+				ShasumsURL:          "http://127.0.0.1:8080/terraform-provider-badsig/0.1.0/terraform-provider-badsig_0.1.0_SHA256SUMS",
+				ShasumsSignatureURL: "http://127.0.0.1:8080/terraform-provider-badsig/0.1.0/terraform-provider-badsig_0.1.0_SHA256SUMS.sig",
 				Filename:            "terraform-provider-template_0.1.0_darwin_amd64.zip",
 			},
 			true,
@@ -372,8 +393,13 @@ func TestProviderChecksum(t *testing.T) {
 
 	for _, test := range tests {
 		sha256sum, err := i.getProviderChecksum(test.URLs)
-		if err != nil {
-			t.Fatal(err)
+		if test.Err {
+			if err == nil {
+				t.Fatal("succeeded; want error")
+			}
+			return
+		} else if err != nil {
+			t.Fatalf("unexpected error: %s", err)
 		}
 
 		// get the expected checksum for our os/arch
@@ -421,12 +447,22 @@ var versionList = response.TerraformProvider{
 	Versions: []*response.TerraformProviderVersion{
 		{Version: "1.2.1"},
 		{Version: "1.2.3"},
-		{Version: "1.2.4"},
+		{
+			Version:   "1.2.4",
+			Protocols: []string{"4"},
+			Platforms: []*response.TerraformProviderPlatform{
+				{
+					OS:   "darwin",
+					Arch: "amd64",
+				},
+			},
+		},
 	},
 }
 
 var downloadURLs = response.TerraformProviderPlatformLocation{
-	ShasumsURL:          "https://registry.terraform.io/terraform-provider-template/0.1.0/terraform-provider-template_0.1.0_SHA256SUMS",
-	ShasumsSignatureURL: "https://registry.terraform.io/terraform-provider-template/0.1.0/terraform-provider-template_0.1.0_SHA256SUMS.sig",
-	Filename:            "terraform-provider-template_0.1.0_darwin_amd64.zip",
+	ShasumsURL:          "https://registry.terraform.io/terraform-provider-template/1.2.4/terraform-provider-test_1.2.4_SHA256SUMS",
+	ShasumsSignatureURL: "https://registry.terraform.io/terraform-provider-template/1.2.4/terraform-provider-test_1.2.4_SHA256SUMS.sig",
+	Filename:            "terraform-provider-template_1.2.4_darwin_amd64.zip",
+	DownloadURL:         "http://127.0.0.1:8080/v1/providers/terraform-providers/terraform-provider-test/1.2.4/terraform-provider-test_1.2.4_darwin_amd64.zip",
 }

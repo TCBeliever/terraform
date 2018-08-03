@@ -126,7 +126,7 @@ func (i *ProviderInstaller) Get(provider string, req Constraints) (PluginMeta, e
 
 	// TODO: return multiple errors
 	if err != nil {
-		return PluginMeta{}, err
+		return PluginMeta{}, ErrorNoSuchProvider
 	}
 	if len(allVersions.Versions) == 0 {
 		return PluginMeta{}, ErrorNoSuitableVersion
@@ -143,6 +143,13 @@ func (i *ProviderInstaller) Get(provider string, req Constraints) (PluginMeta, e
 
 	// the winning version is the newest
 	versionMeta := versions[0]
+	if len(versionMeta.Protocols) == 0 {
+		return PluginMeta{}, fmt.Errorf("no provider protocols listed")
+	}
+	if len(versionMeta.Platforms) == 0 {
+		return PluginMeta{}, fmt.Errorf("no provider platforms listed")
+	}
+
 	// get a Version from the version string
 	// we already know this will not error from the preceding functions
 	v, _ := VersionStr(versionMeta.Version).Parse()
@@ -156,8 +163,6 @@ func (i *ProviderInstaller) Get(provider string, req Constraints) (PluginMeta, e
 	// check plugin protocol compatibility
 	// We only validate the most recent version that meets the version constraints.
 	// see RFC TF-055: Provider Protocol Versioning for more information
-
-	fmt.Println("checking protocol version")
 	err = i.checkPluginProtocol(versionMeta)
 	if err != nil {
 		return PluginMeta{}, err
@@ -169,7 +174,7 @@ func (i *ProviderInstaller) Get(provider string, req Constraints) (PluginMeta, e
 		if p.Arch == i.Arch && p.OS == i.OS {
 			downloadURLs, err = i.listProviderDownloadURLs(provider, versionMeta.Version)
 			if err != nil {
-				return PluginMeta{}, fmt.Errorf("Problem getting ")
+				return PluginMeta{}, err
 			}
 			break
 		}
@@ -256,7 +261,7 @@ func (i *ProviderInstaller) install(provider string, version Version, url string
 		}
 
 		// Link or copy the cached binary into our install dir so the
-		// normal resolution machinery can find it.
+		// normal resolution machinery can find                                                     it.
 		filename := filepath.Base(cached)
 		targetPath := filepath.Join(i.Dir, filename)
 
@@ -324,7 +329,6 @@ func (i *ProviderInstaller) install(provider string, version Version, url string
 			return err
 		}
 	}
-
 	return nil
 }
 
@@ -378,10 +382,20 @@ func (i *ProviderInstaller) listProviderVersions(name string) (*response.Terrafo
 
 func (i *ProviderInstaller) listProviderDownloadURLs(name, version string) (*response.TerraformProviderPlatformLocation, error) {
 	urls, err := i.registry.TerraformProviderLocation(regsrc.NewTerraformProvider(name, i.OS, i.Arch), version)
+	if urls == nil {
+		return nil, fmt.Errorf("No download urls found for provider %s", i.provider)
+	}
 	return urls, err
 }
 
 func (i *ProviderInstaller) checkPluginProtocol(versionMeta *response.TerraformProviderVersion) error {
+	// TODO: should this be a different error? We should probably differentiate between
+	// no compatible versions and no protocol versions listed at all
+	// No protocols at all!
+	if len(versionMeta.Protocols) == 0 {
+		return ErrorNoVersionCompatible
+	}
+
 	protoString := strconv.Itoa(int(i.PluginProtocolVersion))
 	protocolVersion, err := VersionStr(protoString).Parse()
 	if err != nil {
@@ -400,17 +414,18 @@ func (i *ProviderInstaller) checkPluginProtocol(versionMeta *response.TerraformP
 			log.Printf("[WARN] invalid provider protocol version %q found in the registry", versionMeta.Version)
 			continue
 		}
-		if !protocolConstraint.Allows(proPro) {
-			// TODO: get most recent compatible plugin and return a handy-dandy string for the user
-			// latest, err := getNewestCompatiblePlugin
-			// i.Ui.output|info): "the latest version of plugin BLAH which supports protocol BLAH is BLAH"
-			// Add this to your provider block:
-			// version = ~BLAH
-			// and if none is found, return ErrorNoVersionCompatible
-			return fmt.Errorf("The latest version of plugin %q does not support plugin protocol version %q", i.provider, protocolVersion)
+		// success!
+		if protocolConstraint.Allows(proPro) {
+			return nil
 		}
 	}
-	return nil
+	// TODO: get most recent compatible plugin and return a handy-dandy string for the user
+	// latest, err := getNewestCompatiblePlugin
+	// i.Ui.output|info): "the latest version of plugin BLAH which supports protocol BLAH is BLAH"
+	// Add this to your provider block:
+	// version = ~BLAH
+	// and if none is found, return ErrorNoVersionCompatible
+	return ErrorNoVersionCompatible
 }
 
 func (i *ProviderInstaller) setProvider(p string) {
@@ -434,7 +449,6 @@ func allowedVersions(available *response.TerraformProviderVersions, required Con
 			allowed = append(allowed, v)
 		}
 	}
-
 	return allowed
 }
 
