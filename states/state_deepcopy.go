@@ -148,6 +148,7 @@ func (obj *ResourceInstanceObjectSrc) DeepCopy() *ResourceInstanceObjectSrc {
 	// Some addrs.Referencable implementations are technically mutable, but
 	// we treat them as immutable by convention and so we don't deep-copy here.
 	dependencies := make([]addrs.Referenceable, len(obj.Dependencies))
+	copy(dependencies, obj.Dependencies)
 
 	return &ResourceInstanceObjectSrc{
 		Status:        obj.Status,

@@ -4,6 +4,7 @@ import (
 	"github.com/hashicorp/terraform/addrs"
 	"github.com/hashicorp/terraform/configs"
 	"github.com/hashicorp/terraform/dag"
+	"github.com/hashicorp/terraform/states"
 	"github.com/hashicorp/terraform/tfdiags"
 )
 
@@ -17,7 +18,7 @@ type DestroyPlanGraphBuilder struct {
 	Config *configs.Config
 
 	// State is the current state
-	State *State
+	State *states.State
 
 	// Targets are resources to target
 	Targets []addrs.Targetable
@@ -48,7 +49,7 @@ func (b *DestroyPlanGraphBuilder) Steps() []GraphTransformer {
 	}
 
 	steps := []GraphTransformer{
-		// Creates all the nodes represented in the state.
+		// Creates nodes for the resource instances tracked in the state.
 		&StateTransformer{
 			Concrete: concreteResourceInstance,
 			State:    b.State,

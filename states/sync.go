@@ -195,6 +195,52 @@ func (s *SyncState) RemoveResource(addr addrs.AbsResource) {
 	s.maybePruneModule(addr.Module)
 }
 
+// MaybeFixUpResourceInstanceAddressForCount deals with the situation where a
+// resource has changed from having "count" set to not set, or vice-versa, and
+// so we need to rename the zeroth instance key to no key at all, or vice-versa.
+//
+// Set countEnabled to true if the resource has count set in its new
+// configuration, or false if it does not.
+//
+// The state is modified in-place if necessary, moving a resource instance
+// between the two addresses. The return value is true if a change was made,
+// and false otherwise.
+func (s *SyncState) MaybeFixUpResourceInstanceAddressForCount(addr addrs.AbsResource, countEnabled bool) bool {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	ms := s.state.Module(addr.Module)
+	if ms == nil {
+		return false
+	}
+
+	relAddr := addr.Resource
+	rs := ms.Resource(relAddr)
+	if rs == nil {
+		return false
+	}
+	huntKey := addrs.NoKey
+	replaceKey := addrs.InstanceKey(addrs.IntKey(0))
+	if !countEnabled {
+		huntKey, replaceKey = replaceKey, huntKey
+	}
+
+	is, exists := rs.Instances[huntKey]
+	if !exists {
+		return false
+	}
+
+	if _, exists := rs.Instances[replaceKey]; exists {
+		// If the replacement key also exists then we'll do nothing and keep both.
+		return false
+	}
+
+	// If we get here then we need to "rename" from hunt to replace
+	rs.Instances[replaceKey] = is
+	delete(rs.Instances, huntKey)
+	return true
+}
+
 // SetResourceInstanceCurrent saves the given instance object as the current
 // generation of the resource instance with the given address, simulataneously
 // updating the recorded provider configuration address, dependencies, and

@@ -248,7 +248,7 @@ func TestModuleTreeDependencies(t *testing.T) {
 				root = testModule(t, test.ConfigDir)
 			}
 
-			got := ConfigTreeDependencies(root, test.State)
+			got := ConfigTreeDependencies(root, mustShimLegacyState(test.State))
 			for _, problem := range deep.Equal(got, test.Want) {
 				t.Error(problem)
 			}

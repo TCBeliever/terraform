@@ -130,9 +130,13 @@ func (ms *Module) SetResourceInstanceDeposed(addr addrs.ResourceInstance, key De
 	if rs == nil {
 		panic(fmt.Sprintf("attempt to register deposed instance object for non-existent resource %s", addr.Resource.Absolute(ms.Addr)))
 	}
-	is := rs.EnsureInstance(addr.Key)
 
-	is.Current = obj
+	is := rs.EnsureInstance(addr.Key)
+	if obj != nil {
+		is.Deposed[key] = obj
+	} else {
+		delete(is.Deposed, key)
+	}
 
 	if !is.HasObjects() {
 		// If we have no objects at all then we'll clean up.
